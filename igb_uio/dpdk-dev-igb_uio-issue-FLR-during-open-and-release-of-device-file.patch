@@ -1,0 +1,87 @@
+From patchwork Mon Jun 12 09:38:05 2017
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Subject: [dpdk-dev] igb_uio: issue FLR during open and release of device file
+From: Shijith Thotton <shijith.thotton@caviumnetworks.com>
+X-Patchwork-Id: 25267
+X-Patchwork-Delegate: thomas@monjalon.net
+Message-Id: <1497260285-27536-1-git-send-email-shijith.thotton@caviumnetworks.com>
+List-Id: dev.dpdk.org
+To: dev@dpdk.org
+Cc: Stephen Hemminger <stephen@networkplumber.org>,
+ Ferruh Yigit <ferruh.yigit@intel.com>, Qi Zhang <qi.z.zhang@intel.com>,
+ Wenzhuo Lu <wenzhuo.lu@intel.com>, Thomas Monjalon <thomas@monjalon.net>, 
+ Jianfeng Tan <jianfeng.tan@intel.com>, Gregory Etelson <gregory@weka.io>
+Date: Mon, 12 Jun 2017 15:08:05 +0530
+
+Set UIO info device file operations open and release. Call pci reset
+function inside open and release to clear device state at start and end.
+Copied this behaviour from vfio_pci kernel module code. With this patch,
+it is not mandatory to issue FLR by PMD's during init and close.
+
+Bus master enable and disable are added in open and release respectively
+to take care of device DMA.
+
+Signed-off-by: Shijith Thotton <shijith.thotton@caviumnetworks.com>
+---
+v1 changes:
+ - Added pci set master inside open and clear master inside release.
+ - Remove obvious comments.
+
+RFC: http://dpdk.org/ml/archives/dev/2017-May/066917.html
+
+ lib/librte_eal/linuxapp/igb_uio/igb_uio.c | 33 +++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/lib/librte_eal/linuxapp/igb_uio/igb_uio.c b/lib/librte_eal/linuxapp/igb_uio/igb_uio.c
+index b9d427c..7c04bb9 100644
+--- a/lib/librte_eal/linuxapp/igb_uio/igb_uio.c
++++ b/lib/librte_eal/linuxapp/igb_uio/igb_uio.c
+@@ -170,6 +170,37 @@ struct rte_uio_pci_dev {
+ 	return IRQ_HANDLED;
+ }
+ 
++/**
++ * This gets called while opening uio device file.
++ */
++static int
++igbuio_pci_open(struct uio_info *info, struct inode *inode)
++{
++	struct rte_uio_pci_dev *udev = info->priv;
++	struct pci_dev *dev = udev->pdev;
++
++	pci_reset_function(dev);
++
++	/* set bus master, which was cleared by the reset function */
++	pci_set_master(dev);
++
++	return 0;
++}
++
++static int
++igbuio_pci_release(struct uio_info *info, struct inode *inode)
++{
++	struct rte_uio_pci_dev *udev = info->priv;
++	struct pci_dev *dev = udev->pdev;
++
++	/* stop the device from further DMA */
++	pci_clear_master(dev);
++
++	pci_try_reset_function(dev);
++
++	return 0;
++}
++
+ #ifdef CONFIG_XEN_DOM0
+ static int
+ igbuio_dom0_mmap_phys(struct uio_info *info, struct vm_area_struct *vma)
+@@ -372,6 +403,8 @@ struct rte_uio_pci_dev {
+ 	udev->info.version = "0.1";
+ 	udev->info.handler = igbuio_pci_irqhandler;
+ 	udev->info.irqcontrol = igbuio_pci_irqcontrol;
++	udev->info.open = igbuio_pci_open;
++	udev->info.release = igbuio_pci_release;
+ #ifdef CONFIG_XEN_DOM0
+ 	/* check if the driver run on Xen Dom0 */
+ 	if (xen_initial_domain())
