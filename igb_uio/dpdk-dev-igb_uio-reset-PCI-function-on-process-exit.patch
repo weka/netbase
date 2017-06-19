@@ -1,0 +1,30 @@
+diff --git a/lib/librte_eal/linuxapp/igb_uio/igb_uio.c b/lib/librte_eal/linuxapp/igb_uio/igb_uio.c
+index b9d427c..f09ca0d 100644
+--- a/lib/librte_eal/linuxapp/igb_uio/igb_uio.c
++++ b/lib/librte_eal/linuxapp/igb_uio/igb_uio.c
+@@ -317,6 +317,17 @@ struct rte_uio_pci_dev {
+ 	return (iom != 0 || iop != 0) ? ret : -ENOENT;
+ }
+ 
++static int
++igbuio_pci_release(struct uio_info *info, struct inode *inode)
++{
++	struct rte_uio_pci_dev *udev = info->priv;
++	struct pci_dev *dev = udev->pdev;
++
++	int ret = __pci_reset_function(dev);
++	dev_info(&udev->pdev->dev, "PCI reset %s\n", !ret ? "done" : "failed");
++	return 0;
++}
++
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 8, 0)
+ static int __devinit
+ #else
+@@ -372,6 +383,7 @@ struct rte_uio_pci_dev {
+ 	udev->info.version = "0.1";
+ 	udev->info.handler = igbuio_pci_irqhandler;
+ 	udev->info.irqcontrol = igbuio_pci_irqcontrol;
++	udev->info.release = igbuio_pci_release;
+ #ifdef CONFIG_XEN_DOM0
+ 	/* check if the driver run on Xen Dom0 */
+ 	if (xen_initial_domain())
