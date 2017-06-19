@@ -40,6 +40,10 @@
 
 #include "compat.h"
 
+#ifndef IRQF_NO_THREAD
+#define IRQF_NO_THREAD         0x00010000
+#endif
+
 /**
  * A structure describing the private information for a uio device.
  */
