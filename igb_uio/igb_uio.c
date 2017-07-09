@@ -174,6 +174,41 @@ igbuio_pci_irqhandler(int irq, struct uio_info *info)
 	return IRQ_HANDLED;
 }
 
+/**
+ * This gets called while opening uio device file.
+ */
+static int
+igbuio_pci_open(struct uio_info *info, struct inode *inode)
+{
+	int ret;
+	struct rte_uio_pci_dev *udev = info->priv;
+	struct pci_dev *dev = udev->pdev;
+
+	ret = pci_reset_function(dev);
+	dev_info(&dev->dev, "%s: PCI reset %s\n", __func__, !ret ? "done" : "failed");
+
+	/* set bus master, which was cleared by the reset function */
+	pci_set_master(dev);
+
+	return 0;
+}
+
+static int
+igbuio_pci_release(struct uio_info *info, struct inode *inode)
+{
+	int ret;
+	struct rte_uio_pci_dev *udev = info->priv;
+	struct pci_dev *dev = udev->pdev;
+
+	/* stop the device from further DMA */
+	pci_clear_master(dev);
+
+	ret = pci_reset_function(dev);
+	dev_info(&dev->dev, "%s: PCI reset %s\n", __func__, !ret ? "done" : "failed");
+
+	return 0;
+}
+
 #ifdef CONFIG_XEN_DOM0
 static int
 igbuio_dom0_mmap_phys(struct uio_info *info, struct vm_area_struct *vma)
@@ -321,17 +356,6 @@ igbuio_setup_bars(struct pci_dev *dev, struct uio_info *info)
 	return (iom != 0 || iop != 0) ? ret : -ENOENT;
 }
 
-static int
-igbuio_pci_release(struct uio_info *info, struct inode *inode)
-{
-	struct rte_uio_pci_dev *udev = info->priv;
-	struct pci_dev *dev = udev->pdev;
-
-	int ret = __pci_reset_function(dev);
-	dev_info(&udev->pdev->dev, "PCI reset %s\n", !ret ? "done" : "failed");
-	return 0;
-}
-
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 8, 0)
 static int __devinit
 #else
@@ -387,6 +411,7 @@ igbuio_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	udev->info.version = "0.1";
 	udev->info.handler = igbuio_pci_irqhandler;
 	udev->info.irqcontrol = igbuio_pci_irqcontrol;
+	udev->info.open = igbuio_pci_open;
 	udev->info.release = igbuio_pci_release;
 #ifdef CONFIG_XEN_DOM0
 	/* check if the driver run on Xen Dom0 */
