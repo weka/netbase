@@ -1,25 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*-
- * GPL LICENSE SUMMARY
- *
- *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of version 2 of the GNU General Public License as
- *   published by the Free Software Foundation.
- *
- *   This program is distributed in the hope that it will be useful, but
- *   WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *   General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
- *   The full GNU General Public License is included in this distribution
- *   in the file called LICENSE.GPL.
- *
- *   Contact Information:
- *   Intel Corporation
+ * Copyright(c) 2010-2017 Intel Corporation. All rights reserved.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -38,10 +19,6 @@
 
 #include "compat.h"
 
-#ifndef IRQF_NO_THREAD
-#define IRQF_NO_THREAD		0x00010000
-#endif
-
 /**
  * A structure describing the private information for a uio device.
  */
@@ -49,8 +26,10 @@ struct rte_uio_pci_dev {
 	struct uio_info info;
 	struct pci_dev *pdev;
 	enum rte_intr_mode mode;
+	atomic_t refcnt;
 };
 
+static int wc_activate;
 static char *intr_mode;
 static enum rte_intr_mode igbuio_intr_mode_preferred = RTE_INTR_MODE_MSIX;
 /* sriov sysfs */
@@ -257,7 +236,7 @@ igbuio_pci_enable_interrupts(struct rte_uio_pci_dev *udev)
 		}
 #endif
 
-	/* fall back to MSI */
+	/* falls through - to MSI */
 	case RTE_INTR_MODE_MSI:
 #ifndef HAVE_ALLOC_IRQ_VECTORS
 		if (pci_enable_msi(udev->pdev) == 0) {
@@ -276,7 +255,7 @@ igbuio_pci_enable_interrupts(struct rte_uio_pci_dev *udev)
 			break;
 		}
 #endif
-	/* fall back to INTX */
+	/* falls through - to INTX */
 	case RTE_INTR_MODE_LEGACY:
 		if (pci_intx_mask_supported(udev->pdev)) {
 			dev_dbg(&udev->pdev->dev, "using INTX");
@@ -286,7 +265,7 @@ igbuio_pci_enable_interrupts(struct rte_uio_pci_dev *udev)
 			break;
 		}
 		dev_notice(&udev->pdev->dev, "PCI INTX mask not supported\n");
-	/* fall back to no IRQ */
+	/* falls through - to no IRQ */
 	case RTE_INTR_MODE_NONE:
 		udev->mode = RTE_INTR_MODE_NONE;
 		udev->info.irq = UIO_IRQ_NONE;
@@ -303,7 +282,7 @@ igbuio_pci_enable_interrupts(struct rte_uio_pci_dev *udev)
 		err = request_irq(udev->info.irq, igbuio_pci_irqhandler,
 				  udev->info.irq_flags, udev->info.name,
 				  udev);
-	dev_info(&udev->pdev->dev, "uio device registered with irq %lx\n",
+	dev_info(&udev->pdev->dev, "uio device registered with irq %ld\n",
 		 udev->info.irq);
 
 	return err;
@@ -340,16 +319,19 @@ igbuio_pci_open(struct uio_info *info, struct inode *inode)
 	struct pci_dev *dev = udev->pdev;
 	int err;
 
+	if (atomic_inc_return(&udev->refcnt) != 1)
+		return 0;
+
 	/* set bus master, which was cleared by the reset function */
 	pci_set_master(dev);
 
 	/* enable interrupts */
 	err = igbuio_pci_enable_interrupts(udev);
 	if (err) {
+		atomic_dec(&udev->refcnt);
 		dev_err(&dev->dev, "Enable interrupt fails\n");
-		return err;
 	}
-	return 0;
+	return err;
 }
 
 static int
@@ -358,11 +340,13 @@ igbuio_pci_release(struct uio_info *info, struct inode *inode)
 	struct rte_uio_pci_dev *udev = info->priv;
 	struct pci_dev *dev = udev->pdev;
 
-	/* disable interrupts */
-	igbuio_pci_disable_interrupts(udev);
+	if (atomic_dec_and_test(&udev->refcnt)) {
+		/* disable interrupts */
+		igbuio_pci_disable_interrupts(udev);
 
-	/* stop the device from further DMA */
-	pci_clear_master(dev);
+		/* stop the device from further DMA */
+		pci_clear_master(dev);
+	}
 
 	return 0;
 }
@@ -382,9 +366,13 @@ igbuio_pci_setup_iomem(struct pci_dev *dev, struct uio_info *info,
 	len = pci_resource_len(dev, pci_bar);
 	if (addr == 0 || len == 0)
 		return -1;
-	internal_addr = ioremap(addr, len);
-	if (internal_addr == NULL)
-		return -1;
+	if (wc_activate == 0) {
+		internal_addr = ioremap(addr, len);
+		if (internal_addr == NULL)
+			return -1;
+	} else {
+		internal_addr = NULL;
+	}
 	info->mem[n].name = name;
 	info->mem[n].addr = addr;
 	info->mem[n].internal_addr = internal_addr;
@@ -480,6 +468,13 @@ igbuio_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	void *map_addr;
 	int err;
 
+#ifdef HAVE_PCI_IS_BRIDGE_API
+	if (pci_is_bridge(dev)) {
+		dev_warn(&dev->dev, "Ignoring PCI bridge device\n");
+		return -ENODEV;
+	}
+#endif
+
 	udev = kzalloc(sizeof(struct rte_uio_pci_dev), GFP_KERNEL);
 	if (!udev)
 		return -ENOMEM;
@@ -523,6 +518,7 @@ igbuio_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	udev->info.release = igbuio_pci_release;
 	udev->info.priv = udev;
 	udev->pdev = dev;
+	atomic_set(&udev->refcnt, 0);
 
 	err = sysfs_create_group(&dev->dev.kobj, &dev_attr_grp);
 	if (err != 0)
@@ -574,6 +570,8 @@ igbuio_pci_remove(struct pci_dev *dev)
 {
 	struct rte_uio_pci_dev *udev = pci_get_drvdata(dev);
 
+	igbuio_pci_release(&udev->info, NULL);
+
 	sysfs_remove_group(&dev->dev.kobj, &dev_attr_grp);
 	uio_unregister_device(&udev->info);
 	igbuio_pci_release_iomem(&udev->info);
@@ -619,6 +617,14 @@ igbuio_pci_init_module(void)
 {
 	int ret;
 
+	if (igbuio_kernel_is_locked_down()) {
+		pr_err("Not able to use module, kernel lock down is enabled\n");
+		return -EINVAL;
+	}
+
+	if (wc_activate != 0)
+		pr_info("wc_activate is set\n");
+
 	ret = igbuio_config_intr_mode(intr_mode);
 	if (ret < 0)
 		return ret;
@@ -642,6 +648,12 @@ MODULE_PARM_DESC(intr_mode,
 "    " RTE_INTR_MODE_MSI_NAME "        Use MSI interrupt\n"
 "    " RTE_INTR_MODE_LEGACY_NAME "     Use Legacy interrupt\n"
 "\n");
+
+module_param(wc_activate, int, 0);
+MODULE_PARM_DESC(wc_activate,
+"Activate support for write combining (WC) (default=0)\n"
+"    0 - disable\n"
+"    other - enable\n");
 
 MODULE_DESCRIPTION("UIO driver for Intel IGB PCI cards");
 MODULE_LICENSE("GPL");
