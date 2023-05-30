@@ -15,7 +15,7 @@
 #include <linux/version.h>
 #include <linux/slab.h>
 
-#include <rte_pci_dev_features.h>
+#include "rte_pci_dev_features.h"
 
 #include "compat.h"
 
@@ -612,6 +612,207 @@ static struct pci_driver igbuio_pci_driver = {
 	.remove = igbuio_pci_remove,
 };
 
+/* ~~~~ mpin_user driver interface ~~~~ */
+#ifdef XARRAY_INIT
+/* XARRAY_INIT marks the existence of the xarray.h file. Introduced in v4.20
+ * But many many systems back-ported this file, so use the marker for existence
+ * TODO: For Kern
+ */
+
+#include <linux/miscdevice.h>
+#include <linux/vmalloc.h>
+#include <linux/mm.h>
+#include <linux/uaccess.h>
+
+#include "mpin_user.h"
+
+#ifndef FOLL_PIN
+
+static inline
+long pin_user_pages(unsigned long start, unsigned long nr_pages,
+		    unsigned int gup_flags, struct page **pages,
+		    struct vm_area_struct **vmas)
+{
+	return get_user_pages(start, nr_pages, gup_flags, pages, vmas);
+}
+
+void unpin_user_pages(struct page **pages, unsigned long npages)
+{
+	uint i;
+	for (i = 0; i < npages; ++i)
+		put_page(pages[i]);
+}
+
+#ifndef FOLL_LONGTERM
+#	define FOLL_LONGTERM 0
+#endif
+
+#endif /* Linux < 5.6 */
+
+struct mpin_user_container {
+	struct xarray array;
+};
+
+struct pin_pages {
+	unsigned long first;
+	unsigned long nr_pages;
+	struct page **pages;
+};
+
+static int mpin_user_open(struct inode *inode, struct file *file)
+{
+	struct mpin_user_container *p;
+
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	if (!p)
+		return -ENOMEM;
+	file->private_data = p;
+
+	xa_init(&p->array);
+
+	return 0;
+}
+
+static int mpin_user_release(struct inode *inode, struct file *file)
+{
+	struct mpin_user_container *priv = file->private_data;
+	struct pin_pages *p;
+	unsigned long idx;
+
+	xa_for_each(&priv->array, idx, p) {
+		unpin_user_pages(p->pages, p->nr_pages);
+		xa_erase(&priv->array, p->first);
+		vfree(p->pages);
+		kfree(p);
+	}
+
+	xa_destroy(&priv->array);
+	kfree(priv);
+
+	return 0;
+}
+
+static int mpin_user_pin_page(struct mpin_user_container *priv, struct mpin_user_address *addr)
+{
+	unsigned int flags = FOLL_FORCE | FOLL_WRITE | FOLL_LONGTERM;
+	unsigned long first, last, nr_pages;
+	struct page **pages;
+	struct pin_pages *p;
+	int ret;
+
+	if (!(addr->addr && addr->size)) {
+		pr_err("mpin_user: %s: called-by(%s:%d) addr=0x%llx size=0x%llx\n",
+			__func__, current->comm, current->pid, addr->addr, addr->size);
+		return -EINVAL;
+	}
+
+	first = (addr->addr & PAGE_MASK) >> PAGE_SHIFT;
+	last = ((addr->addr + addr->size - 1) & PAGE_MASK) >> PAGE_SHIFT;
+	nr_pages = last - first + 1;
+
+	pr_warn("mpin_user: %s: called-by(%s:%d) addr=0x%llx size=0x%llx first=0x%lx last=0x%lx nr_pages=0x%lx",
+	__func__, current->comm, current->pid, addr->addr, addr->size, first, last, nr_pages);
+
+	pages = vmalloc(nr_pages * sizeof(struct page *));
+	if (!pages)
+		return -ENOMEM;
+
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	if (!p) {
+		ret = -ENOMEM;
+		goto free;
+	}
+
+	ret = pin_user_pages(addr->addr & PAGE_MASK, nr_pages, flags, pages, NULL);
+	if (ret != nr_pages) {
+		pr_err("uacce: Failed to pin page\n");
+		goto free_p;
+	}
+	p->first = first;
+	p->nr_pages = nr_pages;
+	p->pages = pages;
+
+	ret = xa_err(xa_store(&priv->array, p->first, p, GFP_KERNEL));
+	if (ret)
+		goto unpin_pages;
+
+	return 0;
+
+unpin_pages:
+	unpin_user_pages(pages, nr_pages);
+free_p:
+	kfree(p);
+free:
+	vfree(pages);
+	return ret;
+}
+
+static int mpin_user_unpin_page(struct mpin_user_container *priv,
+			    struct mpin_user_address *addr)
+{
+	unsigned long first, last, nr_pages;
+	struct pin_pages *p;
+
+	first = (addr->addr & PAGE_MASK) >> PAGE_SHIFT;
+	last = ((addr->addr + addr->size - 1) & PAGE_MASK) >> PAGE_SHIFT;
+	nr_pages = last - first + 1;
+
+	/* find pin_pages */
+	p = xa_load(&priv->array, first);
+	if (!p)
+		return -ENODEV;
+
+	if (p->nr_pages != nr_pages)
+		return -EINVAL;
+
+	/* unpin */
+	unpin_user_pages(p->pages, p->nr_pages);
+
+	/* release resource */
+	xa_erase(&priv->array, first);
+	vfree(p->pages);
+	kfree(p);
+
+	return 0;
+}
+
+static long mpin_user_unl_ioctl(struct file *filep, unsigned int cmd,
+				 unsigned long arg)
+{
+	struct mpin_user_container *p = filep->private_data;
+	struct mpin_user_address addr;
+
+	if (copy_from_user(&addr, (void __user *)arg, sizeof(struct mpin_user_address)))
+		return -EFAULT;
+
+	switch (cmd) {
+	case MPIN_CMD_PIN:
+		return mpin_user_pin_page(p, &addr);
+
+	case MPIN_CMD_UNPIN:
+		return mpin_user_unpin_page(p, &addr);
+
+	default:
+		return -EINVAL;
+	}
+}
+
+static const struct file_operations mpin_user_fops = {
+	.owner = THIS_MODULE,
+	.open = mpin_user_open,
+	.release = mpin_user_release,
+	.unlocked_ioctl	= mpin_user_unl_ioctl,
+};
+
+static struct miscdevice mpin_user_miscdev = {
+	.name = mpin_user_dev,
+	.minor = MISC_DYNAMIC_MINOR,
+	.fops = &mpin_user_fops,
+};
+
+#endif // def XARRAY_INIT
+
+
 static int __init
 igbuio_pci_init_module(void)
 {
@@ -629,12 +830,31 @@ igbuio_pci_init_module(void)
 	if (ret < 0)
 		return ret;
 
-	return pci_register_driver(&igbuio_pci_driver);
+	ret = pci_register_driver(&igbuio_pci_driver);
+	if (ret < 0) {
+		pr_err("pci_register_driver => %d\n", ret);
+		return ret;
+	}
+
+#ifdef XARRAY_INIT
+	ret = misc_register(&mpin_user_miscdev);
+	if (ret) {
+		pr_err("mpin_user: ctrl dev registration failed => %d\n", ret);
+		// we do not fail load on this error
+	} else {
+		pr_info("mpin_user: Loaded /dev/%s device interface\n", mpin_user_dev);
+	}
+#endif
+
+	return 0;
 }
 
 static void __exit
 igbuio_pci_exit_module(void)
 {
+#ifdef XARRAY_INIT
+	misc_deregister(&mpin_user_miscdev);
+#endif
 	pci_unregister_driver(&igbuio_pci_driver);
 }
 
