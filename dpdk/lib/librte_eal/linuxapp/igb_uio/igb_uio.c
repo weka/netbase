@@ -235,8 +235,8 @@ igbuio_pci_enable_interrupts(struct rte_uio_pci_dev *udev)
 			break;
 		}
 #endif
-
 	/* falls through - to MSI */
+	fallthrough;
 	case RTE_INTR_MODE_MSI:
 #ifndef HAVE_ALLOC_IRQ_VECTORS
 		if (pci_enable_msi(udev->pdev) == 0) {
@@ -256,6 +256,7 @@ igbuio_pci_enable_interrupts(struct rte_uio_pci_dev *udev)
 		}
 #endif
 	/* falls through - to INTX */
+	fallthrough;
 	case RTE_INTR_MODE_LEGACY:
 		if (pci_intx_mask_supported(udev->pdev)) {
 			dev_dbg(&udev->pdev->dev, "using INTX");
@@ -266,6 +267,7 @@ igbuio_pci_enable_interrupts(struct rte_uio_pci_dev *udev)
 		}
 		dev_notice(&udev->pdev->dev, "PCI INTX mask not supported\n");
 	/* falls through - to no IRQ */
+	fallthrough;
 	case RTE_INTR_MODE_NONE:
 		udev->mode = RTE_INTR_MODE_NONE;
 		udev->info.irq = UIO_IRQ_NONE;
@@ -703,19 +705,24 @@ static int mpin_user_pin_page(struct mpin_user_container *priv, struct mpin_user
 	if (!(addr->addr && addr->size)) {
 		pr_err("mpin_user: %s: called-by(%s:%d) addr=0x%llx size=0x%llx\n",
 			__func__, current->comm, current->pid, addr->addr, addr->size);
-		return -EINVAL;
+		return 0;
+		// return -EINVAL;
 	}
 
 	first = (addr->addr & PAGE_MASK) >> PAGE_SHIFT;
 	last = ((addr->addr + addr->size - 1) & PAGE_MASK) >> PAGE_SHIFT;
 	nr_pages = last - first + 1;
 
-	pr_warn("mpin_user: %s: called-by(%s:%d) addr=0x%llx size=0x%llx first=0x%lx last=0x%lx nr_pages=0x%lx",
-	__func__, current->comm, current->pid, addr->addr, addr->size, first, last, nr_pages);
+	pr_debug("mpin_user: %s: called-by(%s:%d) addr=0x%llx size=0x%llx first=0x%lx last=0x%lx nr_pages=0x%lx",
+		__func__, current->comm, current->pid, addr->addr, addr->size, first, last, nr_pages);
 
 	pages = vmalloc(nr_pages * sizeof(struct page *));
-	if (!pages)
+	if (!pages) {
+		pr_err("mpin_user: %s: called-by(%s:%d) addr=0x%llx size=0x%llx first=0x%lx last=0x%lx nr_pages=0x%lx",
+			__func__, current->comm, current->pid, addr->addr, addr->size, first, last, nr_pages);
+
 		return -ENOMEM;
+	}
 
 	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p) {
