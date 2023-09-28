@@ -152,3 +152,7 @@ static inline bool igbuio_kernel_is_locked_down(void)
 	return false;
 #endif
 }
+
+#ifndef fallthrough
+# define fallthrough                    do {} while (0)  /* fallthrough */
+#endif
