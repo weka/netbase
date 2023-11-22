@@ -3,7 +3,7 @@
 # Makefile & Kbuild file for building installing the igb_uio.ko driver
 # options make, make install, make clean ...
 
-IGB_UIO_VERSION ?= weka1.0.1
+IGB_UIO_VERSION ?= weka1.0.2
 
 #default is to compile against the running kernel (kernel-devel installed on the system)
 # do 'make KERNEL_PATH=/home/user/my_kernel_path/ to compile against an alternative path

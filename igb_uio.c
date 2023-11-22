@@ -10,6 +10,7 @@
 
 #include <linux/device.h>
 #include <linux/module.h>
+#include <linux/dma-mapping.h>
 #include <linux/pci.h>
 #include <linux/uio_driver.h>
 #include <linux/io.h>
@@ -504,15 +505,15 @@ igbuio_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		goto fail_release_iomem;
 
 	/* set 64-bit DMA mask */
-	err = pci_set_dma_mask(dev,  DMA_BIT_MASK(64));
+	err = dma_set_mask(&dev->dev, DMA_BIT_MASK(64));
 	if (err != 0) {
 		dev_err(&dev->dev, "Cannot set DMA mask\n");
 		goto fail_release_iomem;
 	}
 
-	err = pci_set_consistent_dma_mask(dev, DMA_BIT_MASK(64));
+	err = dma_set_coherent_mask(&dev->dev, DMA_BIT_MASK(64));
 	if (err != 0) {
-		dev_err(&dev->dev, "Cannot set consistent DMA mask\n");
+		dev_err(&dev->dev, "Cannot set coherent DMA mask\n");
 		goto fail_release_iomem;
 	}
 
