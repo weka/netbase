@@ -1,0 +1,11 @@
+igb_uio - WEKA
+--------------
+
+This contains a version of igb_uio that has been modified
+for use with WEKA software.  The original driver was extracted
+from the DPDK version 18.11, and was authored by Intel and
+licensed under the terms of the GPL 2.0.
+
+It is anticipated that in the future WEKA software will
+move towards using vfio that is bundled in modern Linux kernels,
+at which point this driver will be obsolete.
