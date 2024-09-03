@@ -663,7 +663,7 @@ MODULE_PARM_DESC(intr_mode,
 "    " RTE_INTR_MODE_LEGACY_NAME "     Use Legacy interrupt\n"
 "\n");
 
-module_param(wc_activate, int, 0);
+module_param(wc_activate, int, S_IRUGO);
 MODULE_PARM_DESC(wc_activate,
 "Activate support for write combining (WC) (default=0)\n"
 "    0 - disable\n"
