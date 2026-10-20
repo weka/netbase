@@ -156,3 +156,7 @@ static inline bool igbuio_kernel_is_locked_down(void)
 #ifndef fallthrough
 # define fallthrough                    do {} while (0)  /* fallthrough */
 #endif
+
+#ifndef PCI_CLASS_STORAGE_EXPRESS
+#define PCI_CLASS_STORAGE_EXPRESS	0x010802
+#endif

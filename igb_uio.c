@@ -329,8 +329,13 @@ igbuio_pci_open(struct uio_info *info, struct inode *inode)
 	if (atomic_inc_return(&udev->refcnt) != 1)
 		return 0;
 
-	/* set bus master, which was cleared by the reset function */
-	pci_set_master(dev);
+	/*
+	 * An NVMe controller left enabled by a dead owner resumes DMA into its old
+	 * queues once bus master is on. SPDK and dnvme set bus master themselves,
+	 * after disabling the controller.
+	 */
+	if (dev->class != PCI_CLASS_STORAGE_EXPRESS)
+		pci_set_master(dev);
 
 	/* enable interrupts */
 	err = igbuio_pci_enable_interrupts(udev);
@@ -495,9 +500,6 @@ igbuio_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		dev_err(&dev->dev, "Cannot enable PCI device\n");
 		goto fail_free;
 	}
-
-	/* enable bus mastering on the device */
-	pci_set_master(dev);
 
 	/* remap IO memory */
 	err = igbuio_setup_bars(dev, &udev->info);
