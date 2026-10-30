@@ -333,6 +333,10 @@ igbuio_pci_open(struct uio_info *info, struct inode *inode)
 	 * An NVMe controller left enabled by a dead owner resumes DMA into its old
 	 * queues once bus master is on. SPDK and dnvme set bus master themselves,
 	 * after disabling the controller.
+	 *
+	 * Keeping bus master off here is only an extra safety net. It does not
+	 * replace an FLR or a device-specific reset in the client driver, which
+	 * must still reset the device when it takes it over.
 	 */
 	if (dev->class != PCI_CLASS_STORAGE_EXPRESS)
 		pci_set_master(dev);
